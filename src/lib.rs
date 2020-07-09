@@ -28,6 +28,19 @@ pub enum Instruction {
     Block(Vec<Instruction>, u32)
 }
 
+impl Instruction {
+    fn set_n(self, n: u32) -> Self {
+        use Instruction::*;
+
+        match self {
+            Step(_) => Step(n),
+            TurnLeft(_) => TurnLeft(n),
+            TurnRight(_) => TurnRight(n),
+            Block(v, _) => Block(v, n)
+        }
+    }
+}
+
 #[derive (Debug)]
 struct Position {
     pub x: usize,
@@ -171,6 +184,17 @@ pub mod parser {
         instructions
     }
 
+    fn instruction<'a>() -> impl Parser<'a, Instruction> {
+        step_n()
+            .or(turn_left_n())
+            .or(turn_right_n())
+            .or(step())
+            .or(turn_left())
+            .or(turn_right())
+            .or(block_n())
+            .or(block())
+    }
+
     fn number(input: &str) -> ParseRes<u32> {
         let mut matched = String::new();
         let mut chars = input.chars();
@@ -216,91 +240,50 @@ pub mod parser {
         }
     }
 
-    fn step<'a>() ->
-        impl Parser<'a, Instruction>
-    {
-        map(char('F'), |_| Instruction::Step(1))
+    fn step<'a>() -> impl Parser<'a, Instruction> {
+        char('F')
+            .map(|_| Instruction::Step(1))
     }
 
-    fn turn_left<'a>() ->
-        impl Parser<'a, Instruction>
-    {
-        map(char('L'), |_| Instruction::TurnLeft(1))
+    fn turn_left<'a>() -> impl Parser<'a, Instruction> {
+        char('L')
+            .map(|_| Instruction::TurnLeft(1))
     }
 
-    fn turn_right<'a>() ->
-        impl Parser<'a, Instruction>
-    {
-        map(char('R'), |_| Instruction::TurnRight(1))
+    fn turn_right<'a>() -> impl Parser<'a, Instruction> {
+        char('R')
+            .map(|_| Instruction::TurnRight(1))
     }
 
-    fn step_n<'a>() ->
-        impl Parser<'a, Instruction>
-    {
-        map(
-            pair(char('F'), number),
-            |(_, n)| Instruction::Step(n)
-        )
+    fn block<'a>() -> impl Parser<'a, Instruction> {
+        char('(')
+            .right(zero_or_more(lazy(instruction)))
+            .left(char(')'))
+            .map(|instructions| Instruction::Block(instructions, 1))
     }
 
-    fn turn_left_n<'a>() ->
-        impl Parser<'a, Instruction>
-    {
-        map(
-            pair(char('L'), number),
-            |(_, n)| Instruction::TurnLeft(n)
-        )
+    fn step_n<'a>() -> impl Parser<'a, Instruction> {
+        with_number(step())
     }
 
-    fn turn_right_n<'a>() ->
-        impl Parser<'a, Instruction>
-    {
-            map(
-                pair(char('R'), number),
-                |(_, n)| Instruction::TurnRight(n)
-            )
+    fn turn_left_n<'a>() -> impl Parser<'a, Instruction> {
+        with_number(turn_left())
     }
 
-    fn block<'a>() ->
-        impl Parser<'a, Instruction>
-    {
-        left(
-            right(
-                char('('),
-                zero_or_more(lazy(instruction)),
-            ),
-            char(')')
-        )
-        .map(|instructions| Instruction::Block(instructions, 1))
+    fn turn_right_n<'a>() -> impl Parser<'a, Instruction> {
+        with_number(turn_right())
     }
 
-    fn block_n<'a>() ->
-        impl Parser<'a, Instruction>
-    {
-        pair(
-            left(
-                right(
-                    char('('),
-                    zero_or_more(lazy(instruction)),
-                ),
-                char(')')
-            ),
-            number
-        )
-        .map(|(instructions, n)| Instruction::Block(instructions, n))
+    fn block_n<'a>() -> impl Parser<'a, Instruction> {
+        with_number(block())
     }
 
-    fn instruction<'a>() ->
-        impl Parser<'a, Instruction>
+    fn with_number<'a, P>(p: P)
+        -> impl Parser<'a, Instruction>
+    where
+        P: Parser<'a, Instruction> + 'a
     {
-        step_n()
-            .or(turn_left_n())
-            .or(turn_right_n())
-            .or(step())
-            .or(turn_left())
-            .or(turn_right())
-            .or(block_n())
-            .or(block())
+        p.pair(number).map(|(i, n)| i.set_n(n))
     }
 
 }
@@ -320,6 +303,39 @@ pub mod combinators {
             F: Fn(Output) -> NewOutput + 'a
         {
             BoxedParser::new(map(self, map_fn))
+        }
+
+        fn pair<P, NewOutput>(self, p: P)
+            -> BoxedParser<'a, (Output, NewOutput)>
+        where
+            P: Parser<'a, NewOutput> + 'a,
+            Self: Sized + 'a,
+            Output: 'a,
+            NewOutput: 'a,
+        {
+            BoxedParser::new(pair(self, p))
+        }
+
+        fn left<P, NewOutput>(self, p: P)
+            -> BoxedParser<'a, Output>
+        where
+            P: Parser<'a, NewOutput> + 'a,
+            Self: Sized + 'a,
+            Output: 'a,
+            NewOutput: 'a,
+        {
+            BoxedParser::new(left(self, p))
+        }
+
+        fn right<P, NewOutput>(self, p: P)
+            -> BoxedParser<'a, NewOutput>
+        where
+            P: Parser<'a, NewOutput> + 'a,
+            Self: Sized + 'a,
+            Output: 'a,
+            NewOutput: 'a,
+        {
+            BoxedParser::new(right(self, p))
         }
 
         fn or<P>(self, parser: P)
@@ -383,7 +399,8 @@ pub mod combinators {
         }
     }
 
-    pub fn map<'a, P, F, A, B>(parser: P, map_fn: F) -> impl Parser<'a, B>
+    pub fn map<'a, P, F, A, B>(parser: P, map_fn: F)
+        -> impl Parser<'a, B>
     where
         P: Parser<'a, A>,
         F: Fn(A) -> B
@@ -410,18 +427,26 @@ pub mod combinators {
 
     pub fn left<'a, P1, P2, R1, R2>(parser1: P1, parser2: P2) -> impl Parser<'a, R1>
     where
-        P1: Parser<'a, R1>,
-        P2: Parser<'a, R2>,
+        P1: Parser<'a, R1> + 'a,
+        P2: Parser<'a, R2> + 'a,
+        R1: 'a,
+        R2: 'a
     {
-        map(pair(parser1, parser2), |(left, _right)| left)
+        parser1
+            .pair(parser2)
+            .map(|(left, _)| left)
     }
 
     pub fn right<'a, P1, P2, R1, R2>(parser1: P1, parser2: P2) -> impl Parser<'a, R2>
     where
-        P1: Parser<'a, R1>,
-        P2: Parser<'a, R2>,
+        P1: Parser<'a, R1> + 'a,
+        P2: Parser<'a, R2> + 'a,
+        R1: 'a,
+        R2: 'a
     {
-        map(pair(parser1, parser2), |(_left, right)| right)
+        parser1
+            .pair(parser2)
+            .map(|(_, right)| right)
     }
 
     pub fn zero_or_more<'a, P, T>(parser: P)
