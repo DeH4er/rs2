@@ -1,6 +1,9 @@
+use std::collections::HashMap;
+
 pub fn execute(code: &str) -> String {
     let instructions = parser::parse(code);
     let mut robot = Robot::new();
+    robot.collect_functions(&instructions);
     robot.interpret(&instructions);
     let field = robot.get_field();
     field_to_string(field)
@@ -20,12 +23,14 @@ enum Cell {
     NotVisited
 }
 
-#[derive (Debug)]
+#[derive (Debug, Clone)]
 pub enum Instruction {
     Step(u32),
     TurnLeft(u32),
     TurnRight(u32),
-    Block(Vec<Instruction>, u32)
+    Block(Vec<Instruction>, u32),
+    FunctionDefinition(u32, Vec<Instruction>),
+    FunctionInvokation(u32)
 }
 
 impl Instruction {
@@ -36,7 +41,8 @@ impl Instruction {
             Step(_) => Step(n),
             TurnLeft(_) => TurnLeft(n),
             TurnRight(_) => TurnRight(n),
-            Block(v, _) => Block(v, n)
+            Block(v, _) => Block(v, n),
+            some => some
         }
     }
 }
@@ -51,7 +57,8 @@ struct Position {
 struct Robot {
     direction: Direction,
     field: Vec<Vec<Cell>>,
-    position: Position
+    position: Position,
+    functions: HashMap<u32, Vec<Instruction>>
 }
 
 impl Robot {
@@ -59,7 +66,22 @@ impl Robot {
         Robot {
             direction: Direction::Right,
             field: vec![vec![Cell::Visited]],
-            position: Position {x: 0, y: 0}
+            position: Position {x: 0, y: 0},
+            functions: HashMap::new()
+        }
+    }
+
+    fn collect_functions(&mut self, instructions: &[Instruction]) {
+        use Instruction::*;
+
+        for instruction in instructions.iter() {
+            match instruction {
+                FunctionDefinition(num, instructions) => {
+                    let instructions = instructions.to_vec();
+                    self.functions.insert(*num, instructions);
+                },
+                _ => {}
+            }
         }
     }
 
@@ -76,6 +98,11 @@ impl Robot {
                     (0 .. *times).for_each(|_| self.turn_right()),
                 Block(instructions, times) =>
                     (0 .. *times).for_each(|_| self.interpret(&instructions)),
+                FunctionInvokation(num) => {
+                    let instructions = self.functions.get(&num).unwrap().to_vec();
+                    self.interpret(&instructions);
+                },
+                _ => {}
             }
         }
     }
@@ -193,6 +220,8 @@ pub mod parser {
             .or(turn_right())
             .or(block_n())
             .or(block())
+            .or(function_definition())
+            .or(function_invokation())
     }
 
     fn number(input: &str) -> ParseRes<u32> {
@@ -260,6 +289,20 @@ pub mod parser {
             .right(zero_or_more(lazy(instruction)))
             .left(char(')'))
             .map(|instructions| Instruction::Block(instructions, 1))
+    }
+
+    fn function_definition<'a>() -> impl Parser<'a, Instruction> {
+        char('p')
+            .right(number)
+            .pair(zero_or_more(lazy(instruction)))
+            .left(char('q'))
+            .map(|(num, instructions)| Instruction::FunctionDefinition(num, instructions))
+    }
+
+    fn function_invokation<'a>() -> impl Parser<'a, Instruction> {
+        char('P')
+            .right(number)
+            .map(|num| Instruction::FunctionInvokation(num))
     }
 
     fn step_n<'a>() -> impl Parser<'a, Instruction> {
@@ -533,4 +576,19 @@ fn examples_in_description() {
     execute("F4L((F4R)2(F4L)2)2(F4R)2F4"),
     "    *****   *****   *****\r\n    *   *   *   *   *   *\r\n    *   *   *   *   *   *\r\n    *   *   *   *   *   *\r\n*****   *****   *****   *",
   );
+
+  assert_equal!(
+    execute("p0(F2LF2R)2qP0"),
+    "    *\r\n    *\r\n  ***\r\n  *  \r\n***  "
+  );
+
+  assert_eq!(
+    execute("p312(F2LF2R)2qP312"),
+    "    *\r\n    *\r\n  ***\r\n  *  \r\n***  "
+  );
+
+  assert_equal!(execute("P0p0(F2LF2R)2q"), "    *\r\n    *\r\n  ***\r\n  *  \r\n***  ");
+  assert_equal!(execute("P312p312(F2LF2R)2q"), "    *\r\n    *\r\n  ***\r\n  *  \r\n***  ");
+  assert_equal!(execute("F3P0Lp0(F2LF2R)2qF2"), "       *\r\n       *\r\n       *\r\n       *\r\n     ***\r\n     *  \r\n******  ");
+  assert_equal!(execute("(P0)2p0F2LF2RqP0"), "      *\r\n      *\r\n    ***\r\n    *  \r\n  ***  \r\n  *    \r\n***    ");
 }
