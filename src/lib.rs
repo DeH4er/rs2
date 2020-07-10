@@ -30,7 +30,8 @@ pub enum Instruction {
     TurnRight(u32),
     Block(Vec<Instruction>, u32),
     FunctionDefinition(u32, Vec<Instruction>),
-    FunctionInvokation(u32)
+    FunctionInvokation(u32),
+    Nop
 }
 
 impl Instruction {
@@ -102,7 +103,8 @@ impl Robot {
                     let instructions = self.functions.get(&num).unwrap().to_vec();
                     self.interpret(&instructions);
                 },
-                _ => {}
+                FunctionDefinition(_, _) => {},
+                Nop => {}
             }
         }
     }
@@ -212,16 +214,73 @@ pub mod parser {
     }
 
     fn instruction<'a>() -> impl Parser<'a, Instruction> {
-        step_n()
-            .or(turn_left_n())
-            .or(turn_right_n())
-            .or(step())
-            .or(turn_left())
-            .or(turn_right())
-            .or(block_n())
-            .or(block())
-            .or(function_definition())
-            .or(function_invokation())
+        ignore_spaces(
+            step_n()
+                .or(turn_left_n())
+                .or(turn_right_n())
+                .or(step())
+                .or(turn_left())
+                .or(turn_right())
+                .or(block_n())
+                .or(block())
+                .or(function_definition())
+                .or(function_invokation())
+                .or(line_comment())
+                .or(multiline_comment()))
+    }
+
+    fn pred<'a, P, F, T>(p: P, f: F)
+        -> impl Parser<'a, T>
+    where
+        P: Parser<'a, T>,
+        F: Fn(&T) -> bool
+    {
+        move |input: &'a str| {
+            if let Some((next_input, res)) = p.parse(input) {
+                if f(&res) {
+                    return Some((next_input, res));
+                }
+            }
+
+            None
+        }
+    }
+
+    fn any_char(input: &str) -> ParseRes<char> {
+        let mut chars = input.chars();
+
+        match chars.next() {
+            Some(ch) => Some((&input[1..], ch)),
+            None => None
+        }
+    }
+
+    fn string<'a>(s: &'a str)
+        -> impl Parser<'a, &'a str>
+    {
+        move |input: &'a str| {
+            if input.len() < s.len() {
+                return None;
+            }
+
+            if &input[0 .. s.len()] == s {
+                Some((&input[s.len() ..], s))
+            } else {
+                None
+            }
+        }
+    }
+
+    fn string_n<'a>(n: usize)
+        -> impl Parser<'a, &'a str>
+    {
+        move |input: &'a str| {
+            if input.len() < n {
+                None
+            } else {
+                Some((&input[n ..], &input[0 .. n]))
+            }
+        }
     }
 
     fn number(input: &str) -> ParseRes<u32> {
@@ -252,6 +311,43 @@ pub mod parser {
         let next_index = matched.len();
         let num = matched.parse::<u32>().unwrap();
         Some((&input[next_index .. ], num))
+    }
+
+    fn space0<'a>()
+        -> impl Parser<'a, ()>
+    {
+        zero_or_more(
+            char(' ')
+                .or(char('\n'))
+            ).map(|_| ())
+    }
+
+    fn and1<'a, P1, P2, R1, R2>(p1: P1, p2: P2)
+        -> impl Parser<'a, (R1, R2)>
+    where
+        P1: Parser<'a, R1>,
+        P2: Parser<'a, R2>,
+    {
+        move |input| {
+            if let Some((next_input, res1)) = p1.parse(input) {
+                if let Some((_, res2)) = p2.parse(input) {
+                    return Some((next_input, (res1, res2)));
+                }
+            }
+
+            None
+        }
+    }
+
+    fn ignore_spaces<'a, P, T>(p: P)
+        -> impl Parser<'a, T>
+    where
+        P: Parser<'a, T> + 'a,
+        T: 'a
+    {
+        space0()
+            .right(p)
+            .left(space0())
     }
 
     fn char<'a>(ch: char)
@@ -329,6 +425,34 @@ pub mod parser {
         p.pair(number).map(|(i, n)| i.set_n(n))
     }
 
+    fn line_comment<'a>() -> impl Parser<'a, Instruction> {
+        string("//")
+            .pair(
+                zero_or_more(
+                    pred(any_char, |ch| *ch != '\n')
+                )
+            )
+            .pair(char('\n'))
+            .map(|_| Instruction::Nop)
+    }
+
+    fn multiline_comment<'a>() -> impl Parser<'a, Instruction> {
+        string("/*")
+            .pair(
+                zero_or_more(
+                    and1(
+                        any_char,
+                        pred(
+                            string_n(2),
+                            |s| *s != "*/"
+                        )
+                    )
+                )
+            )
+            .pair(string("*/"))
+            .map(|_| Instruction::Nop)
+    }
+
 }
 
 pub mod combinators {
@@ -391,6 +515,15 @@ pub mod combinators {
         {
             BoxedParser::new(or(self, parser))
         }
+
+        fn debug(self, name: &'a str)
+            -> BoxedParser<'a, Output>
+        where
+            Self: Sized + 'a,
+            Output: std::fmt::Debug + 'a
+        {
+            BoxedParser::new(debug(name, self))
+        }
     }
 
     impl<'a, F, Output> Parser<'a, Output> for F
@@ -451,6 +584,27 @@ pub mod combinators {
         move |input|
             parser.parse(input)
                 .map(|(next_input, res)| (next_input, map_fn(res)))
+    }
+
+    fn debug<'a, P, T>(name: &'a str, p: P)
+        -> impl Parser<'a, T>
+    where
+        P: Parser<'a, T>,
+        T: std::fmt::Debug
+    {
+        move |input| {
+            let res = p.parse(input);
+            if res.is_none() {
+                println!("Parser {} failed", name);
+                println!("Parser {} input:\n{}", name, input);
+                println!("End {} input", name);
+            } else {
+                println!("Parser {} ok", name);
+                println!("Parser {} input:\n{}", name, input);
+                println!("Parser {} result:\n{:?}", name, res.as_ref().unwrap());
+            }
+            res
+        }
     }
 
     pub fn pair<'a, P1, P2, R1, R2>(parser1: P1, parser2: P2)
@@ -591,4 +745,30 @@ fn examples_in_description() {
   assert_equal!(execute("P312p312(F2LF2R)2q"), "    *\r\n    *\r\n  ***\r\n  *  \r\n***  ");
   assert_equal!(execute("F3P0Lp0(F2LF2R)2qF2"), "       *\r\n       *\r\n       *\r\n       *\r\n     ***\r\n     *  \r\n******  ");
   assert_equal!(execute("(P0)2p0F2LF2RqP0"), "      *\r\n      *\r\n    ***\r\n    *  \r\n  ***  \r\n  *    \r\n***    ");
+
+    assert_equal!(
+        execute(r#"/*
+  RoboScript Ultimatum (RSU)
+  A simple and comprehensive code example
+*/
+
+// Define a new pattern with identifier n = 0
+p0
+  // The commands below causes the MyRobot to move
+  // in a short snake-like path upwards if executed
+  (
+    F2 L // Go forwards two steps and then turn left
+  )2 (
+    F2 R // Go forwards two steps and then turn right
+  )2
+q
+
+// Execute the snake-like pattern twice to generate
+// a longer snake-like pattern
+(
+  P0
+)2
+"#),
+    "*  \r\n*  \r\n***\r\n  *\r\n***\r\n*  \r\n***\r\n  *\r\n***"
+    );
 }
